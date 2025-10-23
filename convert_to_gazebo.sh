@@ -15,6 +15,18 @@ WORLD_DIR=worlds
 echo "🛠 Ensuring Docker service 'osm2world' is running..."
 docker compose up -d osm2world >/dev/null
 
+# === 0b. Verify OSM2World binaries are available inside the container ===
+if ! docker compose exec osm2world bash -c "[ -f /opt/osm2world/OSM2World.jar ]"; then
+  cat <<'EOF'
+❌ /opt/osm2world/OSM2World.jar not found inside the container.
+   Make sure you extracted OSM2World-0.4.0 into ./osm2world/ on the host,
+   then run:
+     docker compose down
+     docker compose up -d
+EOF
+  exit 1
+fi
+
 # === 1. Convert the OSM map into OBJ with OSM2World ===
 echo "🚀 Converting $INPUT_OSM to OBJ..."
 docker compose exec osm2world bash -c \

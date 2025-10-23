@@ -11,6 +11,11 @@ Convert OpenStreetMap (`.osm`) extracts into Gazebo-ready static models using th
 1. Download `OSM2World-0.4.0-bin.zip` from the official release:  
    https://github.com/tordanik/OSM2World/releases/download/0.4.0/OSM2World-0.4.0-bin.zip
 2. Extract the archive into the project under `./osm2world/` (the folder should contain `OSM2World.jar`, `lib/`, `textures/`, etc.). The directory is git-ignored so you can replace it at any time.
+3. If the Docker service was already running when you copied the files, restart it so the bind mount sees the new contents:
+   ```bash
+   docker compose down
+   docker compose up -d
+   ```
 
 ## Build and start the container
 ```bash
