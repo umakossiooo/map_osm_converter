@@ -1,0 +1,22 @@
+# Generated assets and vendor bundles
+outputs/
+models/
+worlds/
+osm2world/
+OSM2World-0.4.0-bin/
+
+# Windows ADS metadata
+*.Zone.Identifier
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# Archives / temporary files
+*.zip
+*.tar
+*.tmp
+
+# OS / editor noise
+.DS_Store
+Thumbs.db

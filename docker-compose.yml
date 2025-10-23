@@ -1,0 +1,21 @@
+services:
+  osm2world:
+    build: .
+    image: osm2world:latest
+    container_name: osm2world
+    working_dir: /workspace
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./data:/workspace/data
+      - ./outputs:/workspace/outputs
+      - ./osm2world:/opt/osm2world
+      - ./models:/workspace/models
+      - ./worlds:/workspace/worlds
+      - ./tools:/workspace/tools
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    environment:
+      - DISPLAY=${DISPLAY}
+      - XDG_RUNTIME_DIR=/tmp/osm2world_x11
+      - GZ_SIM_RESOURCE_PATH=/workspace/models
+      - HOME=/workspace
+    tty: true
