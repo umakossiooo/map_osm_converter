@@ -1,5 +1,5 @@
 # Dockerfile for OSM -> 3D conversion with OSM2World 0.4.0 and Gazebo Harmonic
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     GZ_SIM_RESOURCE_PATH=/workspace/models

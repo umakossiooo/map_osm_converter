@@ -1,89 +1,165 @@
 # map_osm_converter
 
-Convert OpenStreetMap (`.osm`) extracts into Gazebo-ready static models using the OSM2World 0.4.0 toolchain packaged in Docker. The workflow generates OBJ meshes, wraps them in Gazebo model metadata, fixes normals, and provides a launch-ready world file for Gazebo Harmonic.
+Convert OpenStreetMap (`.osm`) extracts into Gazebo-ready static models using OSM2World 0.4.0. Generates OBJ meshes, Gazebo models, world files, and extracts waypoints for DRL training.
 
-## Prerequisites
-- Docker and the Docker Compose plugin.
-- OSM2World 0.4.0 binaries (downloaded separately, see below).
-- An `.osm` map extract to convert (place it under `./data/`).
+## Setup
 
-## Rehydrate the project
-1. Download `OSM2World-0.4.0-bin.zip` from the official release:  
-   https://github.com/tordanik/OSM2World/releases/download/0.4.0/OSM2World-0.4.0-bin.zip
-2. Extract the archive into the project under `./osm2world/` (the folder should contain `OSM2World.jar`, `lib/`, `textures/`, etc.). The directory is git-ignored so you can replace it at any time.
-3. If the Docker service was already running when you copied the files, restart it so the bind mount sees the new contents:
-   ```bash
-   docker compose down
-   docker compose up -d
-   ```
+### 1. Prerequisites
+- Docker and Docker Compose
+- OSM2World 0.4.0 binaries
+- An `.osm` map file (place in `./data/`)
 
-## Build and start the container
+### 2. Install OSM2World
+1. Download `OSM2World-0.4.0-bin.zip` from: https://www.osm2world.org/download/
+2. Extract to `./osm2world/` (should contain `OSM2World.jar`, `lib/`, `textures/`, etc.)
+
+### 3. Build and Start Container
 ```bash
+cd /home/studente/ackermann_sim/src/map_osm_converter
 docker compose build
 docker compose up -d
 ```
-The image installs OpenJDK 17, OSM2World’s runtime dependencies, Gazebo Harmonic (`gz sim`), and `assimp-utils`. The service stays idle (`tail -f /dev/null`) until you run a conversion or simulation.
 
-## Convert an OSM file to a Gazebo model
-```bash
-./convert_to_gazebo.sh data/city.osm city_3d
-```
-- Generates `outputs/city_3d.obj` via OSM2World and recomputes face normals (required by Gazebo physics engines).
-- Packages the assets under `models/city_3d/` with `model.config` and `model.sdf` (rotated to Gazebo’s Z-up frame).
-- Creates a ready-to-launch world at `worlds/city_3d.world` using Bullet physics.
+## Convert OSM to Gazebo Model
 
-To make the model discoverable outside the container:
+### Basic Usage
 ```bash
-export GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:$(pwd)/models
+./convert_to_gazebo.sh <osm_file> <model_name> [world_name]
 ```
 
-### Fixing geometry normals manually
-The conversion script calls the normal fixer automatically. To re-run it against an existing OBJ:
+### Example: Convert bari.osm
 ```bash
-docker compose exec osm2world bash -lc \
-  "python3 /workspace/tools/add_obj_normals.py \
-    /workspace/outputs/city_3d.obj \
-    /workspace/outputs/city_3d_with_normals.obj && \
-   mv /workspace/outputs/city_3d_with_normals.obj /workspace/outputs/city_3d.obj"
+./convert_to_gazebo.sh data/bari.osm bari_3d
 ```
 
-## Simulate in Gazebo Harmonic (GUI)
-1. Allow Docker to use your X11 display:
-   ```bash
-   xhost +local:docker
-   ```
-   Ensure `DISPLAY` is set in your shell (e.g., `export DISPLAY=:0`).
-2. Launch Gazebo from inside the container (run as `root` so Gazebo finds a valid home directory):
-   ```bash
-   docker compose up -d osm2world
-   docker compose exec \
-     -u root \
-     -e DISPLAY=$DISPLAY \
-     -e XDG_RUNTIME_DIR=/tmp/osm2world_x11 \
-     osm2world \
-     bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/city_3d.world'
-   ```
-   For headless mode append `-r -s` to the `gz sim` command. To load just the model:
-   ```bash
-   docker compose exec \
-     -u root \
-     -e DISPLAY=$DISPLAY \
-     -e XDG_RUNTIME_DIR=/tmp/osm2world_x11 \
-     osm2world \
-     bash -lc 'mkdir -p ~/.gz && gz sim /workspace/models/city_3d/model.sdf'
-   ```
-3. When finished, revoke display access with `xhost -local:docker`.
+**What it does:**
+- Converts OSM to OBJ mesh via OSM2World with **enhanced graphics**:
+  - ✅ **Terrain generation** - Realistic ground elevation
+  - ✅ **Building colors** - Varied building appearances from OSM tags
+  - ✅ **Vegetation** - Trees in forests and parks
+  - ✅ **Textures** - Realistic materials for streets (asphalt), buildings (walls/windows), green areas (grass), sidewalks (concrete/paving)
+  - ✅ **Billboards** - Optimized tree rendering
+  - ✅ **Props** - Models and assets for enhanced visuals
+- Computes vertex normals for Gazebo physics
+- Creates Gazebo model in `models/<model_name>/` with all textures and assets
+- Generates world file in `worlds/<world_name>.world`
+- Extracts all waypoints to `outputs/<model_name>/<model_name>_waypoints.json`
+- Organizes lanes/streets to `outputs/<model_name>/<model_name>_waypoints_lanes.json`
 
-## Clean up
+**Output Structure (organized by map name):**
+```
+outputs/
+  └── <model_name>/
+      ├── <model_name>.obj
+      ├── <model_name>.obj.mtl
+      ├── <model_name>_waypoints.json
+      └── <model_name>_waypoints_lanes.json
+
+models/
+  └── <model_name>/
+      ├── model.config
+      ├── model.sdf
+      └── meshes/
+          ├── <model_name>.obj
+          ├── <model_name>.obj.mtl
+          ├── cc0textures/  (textures for roads, buildings, grass, etc.)
+          ├── custom/  (custom textures: windows, glass, railway)
+          ├── models/  (3D props: cars, trees, etc.)
+          └── resources/  (shaders and resources)
+
+worlds/
+  └── <world_name>.world
+```
+
+## Visualize in Gazebo
+
+### 1. Setup X11 Display (on host)
+```bash
+xhost +local:docker
+export DISPLAY=:0
+```
+
+### 2. Launch Gazebo (GUI Mode)
+```bash
+docker compose exec \
+  -u root \
+  -e DISPLAY=$DISPLAY \
+  -e XDG_RUNTIME_DIR=/tmp/osm2world_x11 \
+  osm2world \
+  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/<world_name>.world'
+```
+
+**Example for bari_world:**
+```bash
+docker compose exec \
+  -u root \
+  -e DISPLAY=$DISPLAY \
+  -e XDG_RUNTIME_DIR=/tmp/osm2world_x11 \
+  osm2world \
+  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/bari_3d.world'
+```
+
+### 3. Launch Gazebo (Headless Mode)
+```bash
+docker compose exec \
+  -u root \
+  osm2world \
+  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/<world_name>.world -r -s'
+```
+
+### 4. Cleanup
+```bash
+xhost -local:docker
+```
+
+## Output Files
+
+### Model Files
+- `models/<model_name>/model.sdf` - Gazebo model definition (uses OBJ materials for colors)
+- `models/<model_name>/meshes/<model_name>.obj` - 3D mesh with textures, terrain, buildings, vegetation
+- `models/<model_name>/meshes/<model_name>.obj.mtl` - Material definitions
+- `models/<model_name>/meshes/cc0textures/` - Texture library (asphalt, grass, concrete, bricks, etc.)
+- `models/<model_name>/meshes/custom/` - Custom textures (windows, glass, railway)
+- `models/<model_name>/meshes/models/` - 3D props (cars, trees, etc.)
+- `models/<model_name>/meshes/resources/` - Shaders and resources
+
+**Visual Features:**
+- 🛣️ **Streets**: Asphalt textures with road markings
+- 🏢 **Buildings**: Textured walls with windows, varied colors
+- 🌳 **Green Areas**: Grass textures, trees in parks/forests
+- 🚶 **Sidewalks**: Concrete/paving stone textures
+- 💧 **Water**: Water textures for rivers/lakes
+- 🚗 **Props**: 3D models for enhanced realism
+
+### World File
+- `worlds/<world_name>.world` - Gazebo world file
+
+### Waypoint Files (in `outputs/<model_name>/`)
+- `<model_name>_waypoints.json` - All map coordinates (x, y, yaw)
+- `<model_name>_waypoints_lanes.json` - Lanes/streets organized by name
+
+## Quick Reference
+
+**Convert map:**
+```bash
+./convert_to_gazebo.sh data/bari.osm bari_3d bari_world
+```
+
+**View in Gazebo:**
+```bash
+xhost +local:docker
+export DISPLAY=:0
+docker compose exec -u root -e DISPLAY=$DISPLAY -e XDG_RUNTIME_DIR=/tmp/osm2world_x11 osm2world bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/bari_world.world'
+```
+
+**Stop container:**
 ```bash
 docker compose down
 ```
-This stops and removes the helper container. Bring it back with `docker compose up -d` whenever you need to convert more maps.
 
 ## Troubleshooting
-- **`❌ OSM2World did not produce ...`** — the conversion failed because the input `.osm` has invalid/self-intersecting polygons. Inspect the warnings in the log (relation IDs) and clean the data (e.g., via JOSM) or clip the map to a simpler region.
-- **Gazebo crashes at startup** — make sure you use the `docker compose exec -u root ... bash -lc 'mkdir -p ~/.gz && gz sim ...'` command shown above so the logger can create its working directory.
-- **Outputs owned by root** — if you ran the container without the compose file, fix permissions once:  
-  `docker compose exec -u root osm2world chown -R $(id -u):$(id -g) /workspace/outputs /workspace/models`
 
-Happy mapping!
+- **OSM2World not found**: Ensure `OSM2World.jar` exists in `./osm2world/` and restart container
+- **Gazebo crashes**: Use `-u root` flag and ensure `~/.gz` directory exists
+- **Display issues**: Run `xhost +local:docker` and set `DISPLAY=:0`
+- **Model not found**: Export `GZ_SIM_RESOURCE_PATH` to include `$(pwd)/models`
