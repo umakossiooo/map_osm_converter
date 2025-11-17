@@ -88,13 +88,14 @@ mkdir -p "$MODEL_DIR/meshes"
 cp "$OUTPUT_DIR/$MODEL_NAME.obj" "$MODEL_DIR/meshes/"
 cp "$OUTPUT_DIR/$MODEL_NAME.obj.mtl" "$MODEL_DIR/meshes/" 2>/dev/null || true
 
-# Unify road colors: navigable roads (dark grey) vs non-navigable paths (lighter grey)
+# Color-code roads: navigable (dark), sidewalks (medium), curbs (light)
 if [ -f "$MODEL_DIR/meshes/$MODEL_NAME.obj.mtl" ] && [ -f "$SCRIPT_DIR/tools/unify_road_colors.py" ]; then
     echo "🎨 Color-coding roads for navigation clarity..."
     echo "   - Navigable roads (Ackermann vehicles): Dark grey (0.15, 0.15, 0.15)"
-    echo "   - Non-navigable paths (too narrow): Light grey (0.4, 0.4, 0.4)"
-    python3 "$SCRIPT_DIR/tools/unify_road_colors.py" "$MODEL_DIR/meshes/$MODEL_NAME.obj.mtl" 0.15 0.15 0.15 0.4 0.4 0.4
-    echo "   ✅ Roads color-coded: Dark = navigable, Light = non-navigable"
+    echo "   - Sidewalks/pedestrian areas: Medium grey (0.5, 0.5, 0.5)"
+    echo "   - Curbs/barriers: Light grey (0.4, 0.4, 0.4)"
+    python3 "$SCRIPT_DIR/tools/unify_road_colors.py" "$MODEL_DIR/meshes/$MODEL_NAME.obj.mtl" 0.15 0.15 0.15 0.5 0.5 0.5 0.4 0.4 0.4
+    echo "   ✅ Roads color-coded: Dark = navigable, Medium = sidewalks, Light = curbs"
 fi
 
 # Copy textures and assets

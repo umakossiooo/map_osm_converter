@@ -9,15 +9,18 @@ import sys
 from pathlib import Path
 
 
-def unify_road_colors(mtl_file: str, navigable_color: tuple = (0.15, 0.15, 0.15), non_navigable_color: tuple = (0.4, 0.4, 0.4)):
+def unify_road_colors(mtl_file: str, navigable_color: tuple = (0.15, 0.15, 0.15), 
+                     non_navigable_color: tuple = (0.4, 0.4, 0.4),
+                     sidewalk_color: tuple = (0.5, 0.5, 0.5)):
     """
-    Unify road materials: navigable roads get one color (dark), non-navigable roads get another (lighter).
-    This helps visually distinguish where Ackermann robots should navigate.
+    Color-code road materials: navigable roads (dark), sidewalks/pedestrian areas (medium grey).
+    This helps visually distinguish where Ackermann robots should navigate vs pedestrian areas.
     
     Args:
         mtl_file: Path to MTL file
         navigable_color: RGB color tuple (0-1 range) for navigable roads (dark grey) - Ackermann vehicles
-        non_navigable_color: RGB color tuple (0-1 range) for non-navigable roads (lighter grey) - narrow paths
+        non_navigable_color: RGB color tuple (0-1 range) for non-navigable paths (lighter grey) - narrow paths
+        sidewalk_color: RGB color tuple (0-1 range) for sidewalks/pedestrian areas (medium grey) - visual distinction
     """
     mtl_path = Path(mtl_file)
     if not mtl_path.exists():
@@ -28,25 +31,27 @@ def unify_road_colors(mtl_file: str, navigable_color: tuple = (0.15, 0.15, 0.15)
     with open(mtl_path, 'r') as f:
         content = f.read()
     
-    # IMPORTANT: OSM2World assigns ASPHALT to ALL roads (major and minor)
-    # So we cannot reliably distinguish navigable vs non-navigable by material name alone.
-    # The actual navigability is determined by the waypoint filtering (width/lanes/highway type).
-    # 
+    # IMPORTANT: OSM2World assigns materials based on road type and features.
     # For visualization:
-    # - All ASPHALT/CONCRETE roads get dark grey (but not all are navigable - check *_navigable.json!)
-    # - PAVING_STONE/PAVING/KERB get light grey (definitely non-navigable)
+    # - ASPHALT/CONCRETE: Navigable roads (dark grey) - Ackermann vehicles
+    # - PAVING_STONE/PAVING: Sidewalks/pedestrian areas (medium grey) - visual distinction
+    # - KERB: Curbs (light grey) - non-navigable
     # 
-    # Use *_navigable.json files for actual navigability - visual colors are approximate!
+    # Use *_navigable.json files for actual navigability - visual colors help distinguish!
     
-    # Navigable road materials (suitable for Ackermann vehicles - major roads)
-    # Note: These will be dark grey, but actual navigability is determined by waypoint filtering
+    # Navigable road materials (suitable for Ackermann vehicles)
     navigable_materials = [
         'ASPHALT', 'CONCRETE'  # Major roads, primary streets - Ackermann vehicles can navigate
     ]
     
-    # Non-navigable road materials (too narrow, pedestrian areas, sidewalks)
+    # Sidewalk/pedestrian area materials (keep visible but distinct color)
+    sidewalk_materials = [
+        'PAVING_STONE', 'PAVING'  # Sidewalks, pedestrian areas - visible but not navigable
+    ]
+    
+    # Non-navigable materials (curbs, barriers)
     non_navigable_materials = [
-        'PAVING_STONE', 'PAVING', 'KERB'  # Sidewalks, pedestrian areas, curbs - too narrow for Ackermann
+        'KERB'  # Curbs, barriers - too narrow for Ackermann
     ]
     
     # Find all material definitions
@@ -62,31 +67,36 @@ def unify_road_colors(mtl_file: str, navigable_color: tuple = (0.15, 0.15, 0.15)
         material_name = match.group(1)
         material_block = match.group(0)
         
-        # Check if this is a navigable road material
+        # Check material type
         is_navigable = any(nav_mat.lower() in material_name.lower() for nav_mat in navigable_materials)
+        is_sidewalk = any(sidewalk_mat.lower() in material_name.lower() for sidewalk_mat in sidewalk_materials)
         is_non_navigable = any(non_nav_mat.lower() in material_name.lower() for non_nav_mat in non_navigable_materials)
         
+        kd_pattern = r'(Kd\s+)[\d.]+(\s+)[\d.]+(\s+)[\d.]+'
+        
         if is_navigable:
-            # Replace Kd (diffuse color) with navigable road color (dark grey)
-            # Format: Kd r g b
-            kd_pattern = r'(Kd\s+)[\d.]+(\s+)[\d.]+(\s+)[\d.]+'
+            # Navigable roads: dark grey
             replacement = f'\\g<1>{navigable_color[0]}\\g<2>{navigable_color[1]}\\g<3>{navigable_color[2]}'
-            
             if re.search(kd_pattern, material_block):
                 material_block = re.sub(kd_pattern, replacement, material_block)
                 modified = True
-                print(f"  ✅ {material_name} → Navigable road color ({navigable_color[0]}, {navigable_color[1]}, {navigable_color[2]}) - Ackermann vehicles")
+                print(f"  ✅ {material_name} → Navigable road ({navigable_color[0]}, {navigable_color[1]}, {navigable_color[2]}) - Ackermann vehicles")
+        
+        elif is_sidewalk:
+            # Sidewalks/pedestrian areas: medium grey (distinct from roads)
+            replacement = f'\\g<1>{sidewalk_color[0]}\\g<2>{sidewalk_color[1]}\\g<3>{sidewalk_color[2]}'
+            if re.search(kd_pattern, material_block):
+                material_block = re.sub(kd_pattern, replacement, material_block)
+                modified = True
+                print(f"  🚶 {material_name} → Sidewalk/pedestrian ({sidewalk_color[0]}, {sidewalk_color[1]}, {sidewalk_color[2]}) - visual distinction")
         
         elif is_non_navigable:
-            # Replace Kd (diffuse color) with non-navigable road color (lighter grey)
-            # Format: Kd r g b
-            kd_pattern = r'(Kd\s+)[\d.]+(\s+)[\d.]+(\s+)[\d.]+'
+            # Curbs/barriers: light grey
             replacement = f'\\g<1>{non_navigable_color[0]}\\g<2>{non_navigable_color[1]}\\g<3>{non_navigable_color[2]}'
-            
             if re.search(kd_pattern, material_block):
                 material_block = re.sub(kd_pattern, replacement, material_block)
                 modified = True
-                print(f"  ⚠️  {material_name} → Non-navigable color ({non_navigable_color[0]}, {non_navigable_color[1]}, {non_navigable_color[2]}) - too narrow for Ackermann")
+                print(f"  ⚠️  {material_name} → Non-navigable ({non_navigable_color[0]}, {non_navigable_color[1]}, {non_navigable_color[2]}) - curbs/barriers")
         
         new_content.append(material_block)
     
@@ -103,22 +113,25 @@ def unify_road_colors(mtl_file: str, navigable_color: tuple = (0.15, 0.15, 0.15)
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: python3 unify_road_colors.py <mtl_file> [nav_r] [nav_g] [nav_b] [non_nav_r] [non_nav_g] [non_nav_b]")
+        print("Usage: python3 unify_road_colors.py <mtl_file> [nav_r] [nav_g] [nav_b] [sidewalk_r] [sidewalk_g] [sidewalk_b] [non_nav_r] [non_nav_g] [non_nav_b]")
         print("Example: python3 unify_road_colors.py model.obj.mtl")
-        print("  Default: navigable=(0.15,0.15,0.15 dark grey), non-navigable=(0.4,0.4,0.4 light grey)")
+        print("  Default: navigable=(0.15,0.15,0.15 dark grey), sidewalk=(0.5,0.5,0.5 medium grey), non-navigable=(0.4,0.4,0.4 light grey)")
         sys.exit(1)
     
     mtl_file = sys.argv[1]
     
     # Optional color arguments
-    if len(sys.argv) >= 8:
+    if len(sys.argv) >= 11:
         nav_r, nav_g, nav_b = float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
-        non_nav_r, non_nav_g, non_nav_b = float(sys.argv[5]), float(sys.argv[6]), float(sys.argv[7])
+        sidewalk_r, sidewalk_g, sidewalk_b = float(sys.argv[5]), float(sys.argv[6]), float(sys.argv[7])
+        non_nav_r, non_nav_g, non_nav_b = float(sys.argv[8]), float(sys.argv[9]), float(sys.argv[10])
         navigable_color = (nav_r, nav_g, nav_b)
+        sidewalk_color = (sidewalk_r, sidewalk_g, sidewalk_b)
         non_navigable_color = (non_nav_r, non_nav_g, non_nav_b)
     else:
         navigable_color = (0.15, 0.15, 0.15)  # Dark grey - navigable roads (Ackermann vehicles)
-        non_navigable_color = (0.4, 0.4, 0.4)  # Lighter grey - non-navigable paths (too narrow)
+        sidewalk_color = (0.5, 0.5, 0.5)  # Medium grey - sidewalks/pedestrian areas (visual distinction)
+        non_navigable_color = (0.4, 0.4, 0.4)  # Light grey - curbs/barriers
     
-    unify_road_colors(mtl_file, navigable_color, non_navigable_color)
+    unify_road_colors(mtl_file, navigable_color, non_navigable_color, sidewalk_color)
 

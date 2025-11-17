@@ -21,8 +21,10 @@ def filter_osm_for_navigation(input_osm: str, output_osm: str, min_width: float 
     tree = ET.parse(input_osm)
     root = tree.getroot()
     
-    # Roads to exclude
-    excluded_types = ['service', 'footway', 'path', 'pedestrian', 'cycleway', 'track', 'steps']
+    # Roads to exclude (narrow paths, but keep sidewalks/pedestrian areas for visual distinction)
+    excluded_types = ['service', 'footway', 'path', 'cycleway', 'track', 'steps',
+                     'bus_stop', 'traffic_signals', 'give_way', 'stop', 'elevator']
+    # Note: 'pedestrian' and 'crossing' are kept but will be colored differently
     
     # Major roads (always included)
     major_types = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary',
@@ -93,12 +95,28 @@ def filter_osm_for_navigation(input_osm: str, output_osm: str, min_width: float 
             # Other types: keep by default
             ways_to_keep.add(way_id)
     
-    # Second pass: remove ways
+    # Filter relations (but keep pedestrian areas for visual distinction)
+    relations_to_remove = set()
+    for relation in root.findall('relation'):
+        for tag in relation.findall('tag'):
+            highway_type = tag.get('v')
+            if tag.get('k') == 'highway' and highway_type in excluded_types:
+                relations_to_remove.add(relation.get('id'))
+                break
+            # Keep pedestrian/crossing relations - they'll be colored differently
+    
+    # Second pass: remove ways and relations
     removed_count = 0
     for way in list(root.findall('way')):
         way_id = way.get('id')
         if way_id in ways_to_remove:
             root.remove(way)
+            removed_count += 1
+    
+    # Remove filtered relations
+    for relation in list(root.findall('relation')):
+        if relation.get('id') in relations_to_remove:
+            root.remove(relation)
             removed_count += 1
     
     # Save filtered OSM
