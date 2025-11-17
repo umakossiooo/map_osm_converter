@@ -155,12 +155,8 @@ echo "  export GZ_SIM_RESOURCE_PATH=\$GZ_SIM_RESOURCE_PATH:$(pwd)/models"
 echo "Then include it in Gazebo with:"
 echo "  <include><uri>model://$MODEL_NAME</uri></include>"
 
-# === 5. Generate a convenience world file ===
-echo "🌍 Generating Gazebo world file..."
-mkdir -p "$WORLD_DIR"
-bash "$SCRIPT_DIR/create_gazebo_world.sh" "$MODEL_NAME" "$WORLD_NAME" "$WORLD_DIR"
-
-# === 6. Extract waypoints from OSM for DRL coordinate extraction ===
+# === 5. Extract waypoints from OSM for DRL coordinate extraction ===
+# Extract waypoints FIRST so world file can use them for camera positioning
 echo "📍 Extracting road waypoints from OSM for fleet_drl..."
 # Resolve OSM file path (handle both relative and absolute paths)
 if [[ "$INPUT_OSM" = /* ]]; then
@@ -170,29 +166,67 @@ else
 fi
 
 if [ -f "$SCRIPT_DIR/tools/extract_osm_waypoints.py" ] && [ -f "$OSM_PATH" ]; then
-    python3 "$SCRIPT_DIR/tools/extract_osm_waypoints.py" \
+    echo "   Extracting ALL coordinates from OSM (this may take a moment)..."
+    if python3 "$SCRIPT_DIR/tools/extract_osm_waypoints.py" \
         "$OSM_PATH" \
         -o "$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json" \
         -n 999999 \
         -s 2.0 \
-        -m 5.0
-    if [ -f "$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json" ]; then
-        echo "✅ Waypoints extracted to $OUTPUT_DIR/${MODEL_NAME}_waypoints.json"
-        echo "   - Contains ALL map coordinates (no sampling)"
-        if [ -f "$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints_lanes.json" ]; then
-            echo "✅ Lanes/streets organized in $OUTPUT_DIR/${MODEL_NAME}_waypoints_lanes.json"
-            echo "   - Use this file to pick delivery coordinates from specific lanes"
+        -m 5.0; then
+        if [ -f "$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json" ]; then
+            WAYPOINT_COUNT=$(python3 -c "import json; f=open('$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json'); d=json.load(f); print(len(d.get('waypoints', [])))" 2>/dev/null || echo "unknown")
+            echo "✅ Waypoints extracted to $OUTPUT_DIR/${MODEL_NAME}_waypoints.json"
+            echo "   - Contains ALL map coordinates: $WAYPOINT_COUNT waypoints"
+            if [ -f "$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints_lanes.json" ]; then
+                LANE_COUNT=$(python3 -c "import json; f=open('$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints_lanes.json'); d=json.load(f); print(len(d.get('lanes', {})))" 2>/dev/null || echo "unknown")
+                echo "✅ Lanes/streets organized in $OUTPUT_DIR/${MODEL_NAME}_waypoints_lanes.json"
+                echo "   - $LANE_COUNT lanes/streets available for delivery coordinate selection"
+            fi
+            echo "   All outputs organized in: $OUTPUT_DIR/"
+        else
+            echo "❌ ERROR: Waypoint extraction completed but output file not found!"
+            echo "   This is critical for coordinate extraction. Please check the extraction script."
         fi
-        echo "   All outputs organized in: $OUTPUT_DIR/"
     else
-        echo "⚠️  Waypoint extraction completed but output file not found"
+        echo "❌ ERROR: Waypoint extraction failed!"
+        echo "   Coordinates are critical for fleet_drl. Please check the OSM file and extraction script."
     fi
 else
     if [ ! -f "$SCRIPT_DIR/tools/extract_osm_waypoints.py" ]; then
-        echo "⚠️  Waypoint extractor not found at $SCRIPT_DIR/tools/extract_osm_waypoints.py"
+        echo "❌ ERROR: Waypoint extractor not found at $SCRIPT_DIR/tools/extract_osm_waypoints.py"
     fi
     if [ ! -f "$OSM_PATH" ]; then
-        echo "⚠️  OSM file not found: $OSM_PATH"
+        echo "❌ ERROR: OSM file not found: $OSM_PATH"
     fi
     echo "   Run manually: python3 tools/extract_osm_waypoints.py $OSM_PATH -o $OUTPUT_DIR/${MODEL_NAME}_waypoints.json"
+    echo "   ⚠️  WARNING: World file will be created without waypoint-based camera positioning"
+fi
+
+# === 6. Create Gazebo world file ===
+echo "🌍 Creating Gazebo world file..."
+# For bari_3d model, create bari_world.sdf (ackermann project expects this name)
+if [ "$MODEL_NAME" = "bari_3d" ]; then
+    WORLD_FILE_NAME="bari_world"
+else
+    WORLD_FILE_NAME="$WORLD_NAME"
+fi
+
+if [ -f "$SCRIPT_DIR/create_gazebo_world.sh" ]; then
+    # Pass waypoints file path if it exists (for camera positioning)
+    WAYPOINTS_FILE="$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json"
+    if [ -f "$WAYPOINTS_FILE" ]; then
+        bash "$SCRIPT_DIR/create_gazebo_world.sh" "$MODEL_NAME" "$WORLD_FILE_NAME" "$WORLD_DIR" "$WAYPOINTS_FILE"
+    else
+        bash "$SCRIPT_DIR/create_gazebo_world.sh" "$MODEL_NAME" "$WORLD_FILE_NAME" "$WORLD_DIR" ""
+    fi
+    echo "✅ World file created: $WORLD_DIR/${WORLD_FILE_NAME}.sdf"
+    
+    # If this is bari_3d, also copy to ackermann project worlds directory (if it exists)
+    if [ "$MODEL_NAME" = "bari_3d" ] && [ -d "$SCRIPT_DIR/../ackermann-vehicle-gzsim-ros2/saye_description/worlds" ]; then
+        echo "📋 Copying world file to ackermann project..."
+        cp "$WORLD_DIR/${WORLD_FILE_NAME}.sdf" "$SCRIPT_DIR/../ackermann-vehicle-gzsim-ros2/saye_description/worlds/${WORLD_FILE_NAME}.sdf"
+        echo "✅ World file copied to ackermann-vehicle-gzsim-ros2/saye_description/worlds/${WORLD_FILE_NAME}.sdf"
+    fi
+else
+    echo "⚠️  create_gazebo_world.sh not found, skipping world file creation"
 fi

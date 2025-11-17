@@ -17,6 +17,6 @@ services:
     environment:
       - DISPLAY=${DISPLAY}
       - XDG_RUNTIME_DIR=/tmp/osm2world_x11
-      - GZ_SIM_RESOURCE_PATH=/workspace/models
+      - GZ_SIM_RESOURCE_PATH=/workspace/models:/opt/osm2world/models
       - HOME=/workspace
     tty: true

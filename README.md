@@ -42,7 +42,14 @@ docker compose up -d
   - ✅ **Props** - Models and assets for enhanced visuals
 - Computes vertex normals for Gazebo physics
 - Creates Gazebo model in `models/<model_name>/` with all textures and assets
-- Generates world file in `worlds/<world_name>.world`
+- **Automatically generates world file** in `worlds/<world_name>.sdf` (ROS 2 compatible)
+  - For `bari_3d` model: Creates `bari_world.sdf` (compatible with ackermann-vehicle-gzsim-ros2)
+  - Includes all required Gazebo Sim plugins (physics, sensors, scene broadcaster, user commands, IMU)
+  - Model pose transformation matches existing `bari_world.sdf` structure (`-66 -275 0 1.5708 0 1.5708`)
+  - Camera configured to follow robot (`saye::base_link::BaseVisual`)
+  - Automatically copies to `ackermann-vehicle-gzsim-ros2/saye_description/worlds/` if available
+  - **fleet_drl compatibility**: Model visual name `road_lane_street_visual` enables coordinate extraction
+  - **Required**: Set `GZ_SIM_RESOURCE_PATH` to include `map_osm_converter/models` directory
 - Extracts all waypoints to `outputs/<model_name>/<model_name>_waypoints.json`
 - Organizes lanes/streets to `outputs/<model_name>/<model_name>_waypoints_lanes.json`
 
@@ -68,7 +75,7 @@ models/
           └── resources/  (shaders and resources)
 
 worlds/
-  └── <world_name>.world
+  └── <world_name>.sdf
 ```
 
 ## Visualize in Gazebo
@@ -85,32 +92,55 @@ docker compose exec \
   -u root \
   -e DISPLAY=$DISPLAY \
   -e XDG_RUNTIME_DIR=/tmp/osm2world_x11 \
+  -e GZ_SIM_RESOURCE_PATH=/workspace/models:/opt/osm2world/models \
   osm2world \
-  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/<world_name>.world'
+  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/<world_name>.sdf'
 ```
 
-**Example for bari_world:**
+**Example for bari_3d (creates bari_world.sdf for ackermann project):**
 ```bash
 docker compose exec \
   -u root \
   -e DISPLAY=$DISPLAY \
   -e XDG_RUNTIME_DIR=/tmp/osm2world_x11 \
+  -e GZ_SIM_RESOURCE_PATH=/workspace/models:/opt/osm2world/models \
   osm2world \
-  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/bari_3d.world'
+  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/bari_world.sdf'
 ```
+
+**Note:** When converting `bari.osm` with model name `bari_3d`, the world file is automatically created as `worlds/bari_world.sdf` for compatibility with the ackermann-vehicle-gzsim-ros2 project. The world file is also automatically copied to `ackermann-vehicle-gzsim-ros2/saye_description/worlds/bari_world.sdf` if that directory exists.
 
 ### 3. Launch Gazebo (Headless Mode)
 ```bash
 docker compose exec \
   -u root \
+  -e GZ_SIM_RESOURCE_PATH=/workspace/models:/opt/osm2world/models \
   osm2world \
-  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/<world_name>.world -r -s'
+  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/<world_name>.sdf -r -s'
 ```
 
 ### 4. Cleanup
 ```bash
 xhost -local:docker
 ```
+
+## Street-Based Spawning
+
+The conversion automatically extracts street waypoints and positions the camera/spawn points on streets:
+
+- **Camera**: Automatically positioned on a street for better initial view
+- **Spawn Points**: Use waypoints file to get street coordinates for robot spawning
+
+**Get spawn points for robots:**
+```bash
+# Get spawn configuration (JSON format)
+python3 tools/get_street_spawn_points.py outputs/<model_name>/<model_name>_waypoints.json <num_robots>
+
+# Example: Get 3 spawn points
+python3 tools/get_street_spawn_points.py outputs/bari_3d/bari_3d_waypoints.json 3
+```
+
+The world file automatically includes a camera positioned on a street. For robot spawning, use the spawn points from the waypoints file.
 
 ## Output Files
 
@@ -132,7 +162,7 @@ xhost -local:docker
 - 🚗 **Props**: 3D models for enhanced realism
 
 ### World File
-- `worlds/<world_name>.world` - Gazebo world file
+- `worlds/<world_name>.sdf` - Gazebo world file (ROS 2 compatible, SDF format)
 
 ### Waypoint Files (in `outputs/<model_name>/`)
 - `<model_name>_waypoints.json` - All map coordinates (x, y, yaw)
@@ -140,16 +170,23 @@ xhost -local:docker
 
 ## Quick Reference
 
-**Convert map:**
+**Convert bari.osm:**
 ```bash
-./convert_to_gazebo.sh data/bari.osm bari_3d bari_world
+./convert_to_gazebo.sh data/bari.osm bari_3d
 ```
+*Note: The script automatically creates `worlds/bari_world.sdf` (not `bari_3d.sdf`) for ackermann project compatibility.*
 
 **View in Gazebo:**
 ```bash
 xhost +local:docker
 export DISPLAY=:0
-docker compose exec -u root -e DISPLAY=$DISPLAY -e XDG_RUNTIME_DIR=/tmp/osm2world_x11 osm2world bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/bari_world.world'
+docker compose exec \
+  -u root \
+  -e DISPLAY=$DISPLAY \
+  -e XDG_RUNTIME_DIR=/tmp/osm2world_x11 \
+  -e GZ_SIM_RESOURCE_PATH=/workspace/models:/opt/osm2world/models \
+  osm2world \
+  bash -lc 'mkdir -p ~/.gz && gz sim /workspace/worlds/bari_world.sdf'
 ```
 
 **Stop container:**
@@ -163,3 +200,8 @@ docker compose down
 - **Gazebo crashes**: Use `-u root` flag and ensure `~/.gz` directory exists
 - **Display issues**: Run `xhost +local:docker` and set `DISPLAY=:0`
 - **Model not found**: Export `GZ_SIM_RESOURCE_PATH` to include `$(pwd)/models`
+- **fleet_drl compatibility**: 
+  - Ensure `GZ_SIM_RESOURCE_PATH` includes `~/ackermann_sim/src/map_osm_converter/models`
+  - World file is automatically created as `worlds/bari_world.sdf` and copied to `ackermann-vehicle-gzsim-ros2/saye_description/worlds/bari_world.sdf`
+  - Model visual name `road_lane_street_visual` enables coordinate extraction
+  - For waypoint extraction, use `tools/extract_osm_waypoints.py` (more accurate than SDF-based extraction)
