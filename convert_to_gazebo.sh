@@ -11,11 +11,17 @@ OUTPUT_DIR=outputs/$MODEL_NAME
 MODEL_DIR=models/$MODEL_NAME
 WORLD_DIR=worlds
 
-# === 0. Ensure the Docker service is running ===
+# Resolve OSM file path (handle both relative and absolute paths)
+if [[ "$INPUT_OSM" = /* ]]; then
+    OSM_PATH="$INPUT_OSM"
+else
+    OSM_PATH="$SCRIPT_DIR/$INPUT_OSM"
+fi
+
+# === 0. Ensure Docker service is running ===
 echo "🛠 Ensuring Docker service 'osm2world' is running..."
 docker compose up -d osm2world >/dev/null
 
-# === 0b. Verify OSM2World binaries are available inside the container ===
 if ! docker compose exec osm2world bash -c "[ -f /opt/osm2world/OSM2World.jar ]"; then
   cat <<'EOF'
 ❌ /opt/osm2world/OSM2World.jar not found inside the container.
@@ -27,86 +33,83 @@ EOF
   exit 1
 fi
 
-# === 1. Create organized output directory ===
+# === 1. Create output directory ===
 mkdir -p "$OUTPUT_DIR"
 
-# === 2. Convert the OSM map into OBJ with OSM2World ===
-echo "🚀 Converting $INPUT_OSM to OBJ with enhanced graphics..."
-echo "   - Terrain generation: enabled"
-echo "   - Building colors: enabled"
-echo "   - Vegetation (trees): enabled"
-echo "   - Textures: enabled for streets, buildings, green areas"
-echo "   - Billboards: enabled for better visuals"
+# === 2. Pre-filter OSM to exclude narrow roads ===
+FILTERED_OSM="$OUTPUT_DIR/${MODEL_NAME}_navigable.osm"
+OSM_FOR_CONVERSION="$OSM_PATH"
 
-# Use enhanced config if available, otherwise fall back to standard
-ENHANCED_CONFIG="$SCRIPT_DIR/config/enhanced.properties"
-if [ -f "$ENHANCED_CONFIG" ]; then
-    echo "   Using enhanced configuration..."
-    docker compose exec osm2world bash -c \
-    "java -Xms512m -Xmx4g -jar /opt/osm2world/OSM2World.jar \
-      -i $INPUT_OSM \
-      -o $OUTPUT_DIR/$MODEL_NAME.obj \
-      --config /workspace/config/enhanced.properties"
-else
-    echo "   Using standard OSM2World configuration..."
-    docker compose exec osm2world bash -c \
-    "java -Xms512m -Xmx4g -jar /opt/osm2world/OSM2World.jar \
-      -i $INPUT_OSM \
-      -o $OUTPUT_DIR/$MODEL_NAME.obj \
-      --config /opt/osm2world/standard.properties"
+if [ -f "$SCRIPT_DIR/tools/filter_osm_for_navigation.py" ] && [ -f "$OSM_PATH" ]; then
+    echo "🔍 Pre-filtering OSM to exclude narrow roads..."
+    if python3 "$SCRIPT_DIR/tools/filter_osm_for_navigation.py" "$OSM_PATH" "$FILTERED_OSM" 2.5 && [ -f "$FILTERED_OSM" ]; then
+        OSM_FOR_CONVERSION="$FILTERED_OSM"
+        echo "   ✅ Using filtered OSM (narrow roads excluded)"
+    else
+        echo "   ⚠️  Filtering failed, using original OSM"
+    fi
 fi
 
+# === 3. Convert OSM to OBJ with OSM2World ===
+echo "🚀 Converting to OBJ..."
+ENHANCED_CONFIG="$SCRIPT_DIR/config/enhanced.properties"
+CONFIG_ARG=""
+if [ -f "$ENHANCED_CONFIG" ]; then
+    CONFIG_ARG="--config /workspace/config/enhanced.properties"
+    echo "   Using enhanced configuration"
+else
+    CONFIG_ARG="--config /opt/osm2world/standard.properties"
+    echo "   Using standard configuration"
+fi
+
+docker compose exec osm2world bash -c \
+"java -Xms512m -Xmx4g -jar /opt/osm2world/OSM2World.jar \
+  -i $OSM_FOR_CONVERSION \
+  -o $OUTPUT_DIR/$MODEL_NAME.obj \
+  $CONFIG_ARG"
+
 if ! docker compose exec osm2world bash -c "[ -f /workspace/$OUTPUT_DIR/$MODEL_NAME.obj ]"; then
-  echo "❌ OSM2World did not produce $OUTPUT_DIR/$MODEL_NAME.obj. Check the conversion log above for geometry warnings."
+  echo "❌ OSM2World conversion failed. Check logs above."
   exit 1
 fi
 
-# === 3. Recompute normals so DART/Bullet accept the mesh ===
+# === 4. Compute vertex normals ===
 echo "🧮 Computing vertex normals..."
 docker compose exec osm2world bash -c \
 "python3 /workspace/tools/add_obj_normals.py \
   /workspace/$OUTPUT_DIR/$MODEL_NAME.obj \
-  /workspace/$OUTPUT_DIR/${MODEL_NAME}_with_normals.obj"
-docker compose exec osm2world bash -c \
-"mv /workspace/$OUTPUT_DIR/${MODEL_NAME}_with_normals.obj /workspace/$OUTPUT_DIR/$MODEL_NAME.obj"
+  /workspace/$OUTPUT_DIR/${MODEL_NAME}_with_normals.obj && \
+mv /workspace/$OUTPUT_DIR/${MODEL_NAME}_with_normals.obj /workspace/$OUTPUT_DIR/$MODEL_NAME.obj"
 
-# === 4. Package a Gazebo model ===
+# === 5. Package a Gazebo model ===
 echo "📦 Creating folder $MODEL_DIR..."
 mkdir -p "$MODEL_DIR/meshes"
 
 cp "$OUTPUT_DIR/$MODEL_NAME.obj" "$MODEL_DIR/meshes/"
 cp "$OUTPUT_DIR/$MODEL_NAME.obj.mtl" "$MODEL_DIR/meshes/" 2>/dev/null || true
 
-# Copy textures from OSM2World output (if generated)
-if [ -d "$OUTPUT_DIR/textures" ]; then
-  echo "📸 Copying textures from OSM2World output..."
-  cp -r "$OUTPUT_DIR/textures" "$MODEL_DIR/meshes/"
+# Unify road colors: navigable roads (dark grey) vs non-navigable paths (lighter grey)
+if [ -f "$MODEL_DIR/meshes/$MODEL_NAME.obj.mtl" ] && [ -f "$SCRIPT_DIR/tools/unify_road_colors.py" ]; then
+    echo "🎨 Color-coding roads for navigation clarity..."
+    echo "   - Navigable roads (Ackermann vehicles): Dark grey (0.15, 0.15, 0.15)"
+    echo "   - Non-navigable paths (too narrow): Light grey (0.4, 0.4, 0.4)"
+    python3 "$SCRIPT_DIR/tools/unify_road_colors.py" "$MODEL_DIR/meshes/$MODEL_NAME.obj.mtl" 0.15 0.15 0.15 0.4 0.4 0.4
+    echo "   ✅ Roads color-coded: Dark = navigable, Light = non-navigable"
 fi
 
-# Copy OSM2World texture library and models to model directory for Gazebo
-# This ensures streets, buildings, green areas, etc. have realistic colors and props
-echo "🎨 Copying OSM2World assets for beautiful graphics..."
+# Copy textures and assets
+[ -d "$OUTPUT_DIR/textures" ] && cp -r "$OUTPUT_DIR/textures" "$MODEL_DIR/meshes/"
+
+echo "🎨 Copying OSM2World assets..."
 docker compose exec osm2world bash -c \
-"if [ -d /opt/osm2world/textures ]; then
-  # Copy texture libraries
-  cp -r /opt/osm2world/textures/cc0textures /workspace/$MODEL_DIR/meshes/ 2>/dev/null || true
-  cp -r /opt/osm2world/textures/custom /workspace/$MODEL_DIR/meshes/ 2>/dev/null || true
-  find /opt/osm2world/textures -maxdepth 1 -type f \( -name '*.jpg' -o -name '*.png' -o -name '*.JPG' -o -name '*.PNG' -o -name '*.svg' \) -exec cp {} /workspace/$MODEL_DIR/meshes/ \; 2>/dev/null || true
-  echo '✅ Textures copied (streets, buildings, grass, etc.)'
-  
-  # Copy models/props if available (cars, trees, etc.)
-  if [ -d /opt/osm2world/models ]; then
-    cp -r /opt/osm2world/models /workspace/$MODEL_DIR/meshes/ 2>/dev/null || true
-    echo '✅ Models/props copied'
-  fi
-  
-  # Copy resources (shaders, etc.)
-  if [ -d /opt/osm2world/resources ]; then
-    cp -r /opt/osm2world/resources /workspace/$MODEL_DIR/meshes/ 2>/dev/null || true
-  fi
-else
-  echo '⚠️  OSM2World textures directory not found'
-fi" || echo "⚠️  Could not copy OSM2World assets (may still work if textures are embedded)"
+"[ -d /opt/osm2world/textures ] && {
+  cp -r /opt/osm2world/textures/cc0textures /workspace/$MODEL_DIR/meshes/ 2>/dev/null
+  cp -r /opt/osm2world/textures/custom /workspace/$MODEL_DIR/meshes/ 2>/dev/null
+  find /opt/osm2world/textures -maxdepth 1 -type f \( -name '*.jpg' -o -name '*.png' -o -name '*.JPG' -o -name '*.PNG' \) -exec cp {} /workspace/$MODEL_DIR/meshes/ \; 2>/dev/null
+  [ -d /opt/osm2world/models ] && cp -r /opt/osm2world/models /workspace/$MODEL_DIR/meshes/ 2>/dev/null
+  [ -d /opt/osm2world/resources ] && cp -r /opt/osm2world/resources /workspace/$MODEL_DIR/meshes/ 2>/dev/null
+  echo '✅ Assets copied'
+}" || true
 
 cat <<EOF > "$MODEL_DIR/model.config"
 <?xml version="1.0"?>
@@ -155,78 +158,37 @@ echo "  export GZ_SIM_RESOURCE_PATH=\$GZ_SIM_RESOURCE_PATH:$(pwd)/models"
 echo "Then include it in Gazebo with:"
 echo "  <include><uri>model://$MODEL_NAME</uri></include>"
 
-# === 5. Extract waypoints from OSM for DRL coordinate extraction ===
-# Extract waypoints FIRST so world file can use them for camera positioning
-echo "📍 Extracting road waypoints from OSM for fleet_drl..."
-# Resolve OSM file path (handle both relative and absolute paths)
-if [[ "$INPUT_OSM" = /* ]]; then
-    OSM_PATH="$INPUT_OSM"
-else
-    OSM_PATH="$SCRIPT_DIR/$INPUT_OSM"
-fi
+# === 6. Extract waypoints from OSM ===
+echo "📍 Extracting waypoints from OSM..."
+WAYPOINTS_OUT="$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json"
 
 if [ -f "$SCRIPT_DIR/tools/extract_osm_waypoints.py" ] && [ -f "$OSM_PATH" ]; then
-    echo "   Extracting ALL coordinates from OSM (this may take a moment)..."
-    if python3 "$SCRIPT_DIR/tools/extract_osm_waypoints.py" \
-        "$OSM_PATH" \
-        -o "$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json" \
-        -n 999999 \
-        -s 2.0 \
-        -m 5.0; then
-        if [ -f "$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json" ]; then
-            WAYPOINT_COUNT=$(python3 -c "import json; f=open('$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json'); d=json.load(f); print(len(d.get('waypoints', [])))" 2>/dev/null || echo "unknown")
-            echo "✅ Waypoints extracted to $OUTPUT_DIR/${MODEL_NAME}_waypoints.json"
-            echo "   - Contains ALL map coordinates: $WAYPOINT_COUNT waypoints"
-            if [ -f "$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints_lanes.json" ]; then
-                LANE_COUNT=$(python3 -c "import json; f=open('$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints_lanes.json'); d=json.load(f); print(len(d.get('lanes', {})))" 2>/dev/null || echo "unknown")
-                echo "✅ Lanes/streets organized in $OUTPUT_DIR/${MODEL_NAME}_waypoints_lanes.json"
-                echo "   - $LANE_COUNT lanes/streets available for delivery coordinate selection"
-            fi
-            echo "   All outputs organized in: $OUTPUT_DIR/"
-        else
-            echo "❌ ERROR: Waypoint extraction completed but output file not found!"
-            echo "   This is critical for coordinate extraction. Please check the extraction script."
-        fi
+    if python3 "$SCRIPT_DIR/tools/extract_osm_waypoints.py" "$OSM_PATH" -o "$WAYPOINTS_OUT" -n 999999 -s 2.0 -m 5.0; then
+        NAV_LANES_OUT="$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints_navigable_lanes.json"
+        [ -f "$NAV_LANES_OUT" ] && {
+            LANE_COUNT=$(python3 -c "import json; d=json.load(open('$NAV_LANES_OUT')); print(len(d.get('lanes', {})))" 2>/dev/null || echo "unknown")
+            WP_COUNT=$(python3 -c "import json; d=json.load(open('$NAV_LANES_OUT')); print(d.get('total_waypoints', 0))" 2>/dev/null || echo "unknown")
+            echo "✅ Navigable lanes: $LANE_COUNT lanes, $WP_COUNT waypoints → $OUTPUT_DIR/${MODEL_NAME}_waypoints_navigable_lanes.json"
+        }
     else
-        echo "❌ ERROR: Waypoint extraction failed!"
-        echo "   Coordinates are critical for fleet_drl. Please check the OSM file and extraction script."
+        echo "❌ Waypoint extraction failed!"
     fi
 else
-    if [ ! -f "$SCRIPT_DIR/tools/extract_osm_waypoints.py" ]; then
-        echo "❌ ERROR: Waypoint extractor not found at $SCRIPT_DIR/tools/extract_osm_waypoints.py"
-    fi
-    if [ ! -f "$OSM_PATH" ]; then
-        echo "❌ ERROR: OSM file not found: $OSM_PATH"
-    fi
-    echo "   Run manually: python3 tools/extract_osm_waypoints.py $OSM_PATH -o $OUTPUT_DIR/${MODEL_NAME}_waypoints.json"
-    echo "   ⚠️  WARNING: World file will be created without waypoint-based camera positioning"
+    echo "⚠️  Waypoint extraction skipped"
 fi
 
-# === 6. Create Gazebo world file ===
+# === 7. Create Gazebo world file ===
 echo "🌍 Creating Gazebo world file..."
-# For bari_3d model, create bari_world.sdf (ackermann project expects this name)
-if [ "$MODEL_NAME" = "bari_3d" ]; then
-    WORLD_FILE_NAME="bari_world"
-else
-    WORLD_FILE_NAME="$WORLD_NAME"
-fi
+WORLD_FILE_NAME=$([ "$MODEL_NAME" = "bari_3d" ] && echo "bari_world" || echo "$WORLD_NAME")
+WAYPOINTS_FILE="$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json"
 
 if [ -f "$SCRIPT_DIR/create_gazebo_world.sh" ]; then
-    # Pass waypoints file path if it exists (for camera positioning)
-    WAYPOINTS_FILE="$SCRIPT_DIR/$OUTPUT_DIR/${MODEL_NAME}_waypoints.json"
-    if [ -f "$WAYPOINTS_FILE" ]; then
-        bash "$SCRIPT_DIR/create_gazebo_world.sh" "$MODEL_NAME" "$WORLD_FILE_NAME" "$WORLD_DIR" "$WAYPOINTS_FILE"
-    else
-        bash "$SCRIPT_DIR/create_gazebo_world.sh" "$MODEL_NAME" "$WORLD_FILE_NAME" "$WORLD_DIR" ""
-    fi
-    echo "✅ World file created: $WORLD_DIR/${WORLD_FILE_NAME}.sdf"
+    bash "$SCRIPT_DIR/create_gazebo_world.sh" "$MODEL_NAME" "$WORLD_FILE_NAME" "$WORLD_DIR" \
+        "$([ -f "$WAYPOINTS_FILE" ] && echo "$WAYPOINTS_FILE" || echo "")"
+    echo "✅ World file: $WORLD_DIR/${WORLD_FILE_NAME}.sdf"
     
-    # If this is bari_3d, also copy to ackermann project worlds directory (if it exists)
-    if [ "$MODEL_NAME" = "bari_3d" ] && [ -d "$SCRIPT_DIR/../ackermann-vehicle-gzsim-ros2/saye_description/worlds" ]; then
-        echo "📋 Copying world file to ackermann project..."
-        cp "$WORLD_DIR/${WORLD_FILE_NAME}.sdf" "$SCRIPT_DIR/../ackermann-vehicle-gzsim-ros2/saye_description/worlds/${WORLD_FILE_NAME}.sdf"
-        echo "✅ World file copied to ackermann-vehicle-gzsim-ros2/saye_description/worlds/${WORLD_FILE_NAME}.sdf"
-    fi
-else
-    echo "⚠️  create_gazebo_world.sh not found, skipping world file creation"
+    # Copy to ackermann project if bari_3d
+    [ "$MODEL_NAME" = "bari_3d" ] && [ -d "$SCRIPT_DIR/../ackermann-vehicle-gzsim-ros2/saye_description/worlds" ] && \
+        cp "$WORLD_DIR/${WORLD_FILE_NAME}.sdf" "$SCRIPT_DIR/../ackermann-vehicle-gzsim-ros2/saye_description/worlds/${WORLD_FILE_NAME}.sdf" && \
+        echo "✅ Copied to ackermann project"
 fi

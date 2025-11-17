@@ -50,6 +50,19 @@ docker compose up -d
   - Automatically copies to `ackermann-vehicle-gzsim-ros2/saye_description/worlds/` if available
   - **fleet_drl compatibility**: Model visual name `road_lane_street_visual` enables coordinate extraction
   - **Required**: Set `GZ_SIM_RESOURCE_PATH` to include `map_osm_converter/models` directory
+- **Ackermann navigation optimization**:
+  - ✅ **Strict filtering**: Filters narrow roads based on OSM width/lanes tags
+    - **Minimum width**: 3.5m (required for Ackermann vehicle ~0.5m wide)
+    - **Major roads**: Always included (motorway, trunk, primary, secondary, tertiary)
+    - **Residential/Unclassified**: Only included if width ≥ 3.5m or lanes ≥ 1 with estimated width ≥ 3.5m
+    - **Residential without width info**: Excluded (often too narrow)
+  - ✅ **Separate navigable roads file**: Creates `*_navigable.json` and `*_navigable_lanes.json` files with ONLY roads suitable for Ackermann vehicles
+  - ✅ **Color-coded roads** (visual approximation):
+    - **Dark grey (0.15, 0.15, 0.15)**: ASPHALT/CONCRETE roads (major roads)
+    - **Light grey (0.4, 0.4, 0.4)**: PAVING_STONE/PAVING/KERB (sidewalks, pedestrian areas)
+    - **⚠️ Note**: Visual colors are approximate - OSM2World uses ASPHALT for all roads. Use `*_navigable.json` files for actual navigability!
+  - ✅ **Road type filtering**: Includes motorway, trunk, primary, secondary, tertiary, unclassified (if wide), residential (if ≥ 3.5m)
+  - 📍 **Use `*_navigable.json` files for DRL training** - these contain only roads where Ackermann robots should navigate!
 - Extracts all waypoints to `outputs/<model_name>/<model_name>_waypoints.json`
 - Organizes lanes/streets to `outputs/<model_name>/<model_name>_waypoints_lanes.json`
 

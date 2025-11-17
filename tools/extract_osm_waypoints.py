@@ -24,10 +24,13 @@ def parse_osm_ways(osm_file: str, highway_types: List[str] = None) -> List[Dict]
         List of way dictionaries with nodes and metadata
     """
     if highway_types is None:
+        # Only include roads suitable for Ackermann vehicles (exclude narrow paths)
+        # Excluded: 'service' (too narrow, parking lots), 'footway', 'path', 'pedestrian', 'cycleway', 'track', 'steps'
+        # Note: 'residential' and 'unclassified' will be filtered by width/lanes later
         highway_types = [
             'motorway', 'trunk', 'primary', 'secondary', 'tertiary',
-            'unclassified', 'residential', 'service', 'motorway_link',
-            'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link'
+            'unclassified', 'residential',  # Will be filtered by width later
+            'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link'
         ]
     
     tree = ET.parse(osm_file)
@@ -55,6 +58,23 @@ def parse_osm_ways(osm_file: str, highway_types: List[str] = None) -> List[Dict]
                 break
         
         if is_highway:
+            # Filter out non-navigable roads based on access restrictions
+            # Check for access restrictions that prevent vehicle access
+            access_restricted = False
+            for tag in way.findall('tag'):
+                k, v = tag.get('k'), tag.get('v')
+                # Exclude roads with vehicle access restrictions
+                if k == 'access' and v in ['no', 'private', 'permit']:
+                    access_restricted = True
+                if k == 'motor_vehicle' and v == 'no':
+                    access_restricted = True
+                if k == 'vehicle' and v == 'no':
+                    access_restricted = True
+            
+            # Skip if access is restricted (highway type already filtered above)
+            if access_restricted:
+                continue
+            
             # Get node references
             node_refs = [nd.get('ref') for nd in way.findall('nd')]
             # Convert to coordinates
@@ -65,14 +85,33 @@ def parse_osm_ways(osm_file: str, highway_types: List[str] = None) -> List[Dict]
                     coords.append((lat, lon))
             
             if len(coords) >= 2:  # Need at least 2 points for a way
-                # Extract street/lane name from tags
+                # Extract street/lane name and road characteristics from tags
                 street_name = None
                 ref_name = None
+                width = None
+                lanes = None
                 for tag in way.findall('tag'):
-                    if tag.get('k') == 'name':
-                        street_name = tag.get('v')
-                    elif tag.get('k') == 'ref':
-                        ref_name = tag.get('v')
+                    k, v = tag.get('k'), tag.get('v')
+                    if k == 'name':
+                        street_name = v
+                    elif k == 'ref':
+                        ref_name = v
+                    elif k == 'width':
+                        try:
+                            # Handle width in meters or feet
+                            width_str = v.lower().replace('m', '').replace('ft', '').strip()
+                            width_val = float(width_str)
+                            # Convert feet to meters if needed
+                            if 'ft' in v.lower():
+                                width_val *= 0.3048
+                            width = width_val
+                        except:
+                            pass
+                    elif k == 'lanes':
+                        try:
+                            lanes = int(v)
+                        except:
+                            pass
                 
                 # Use name, ref, or highway_type as identifier
                 lane_id = street_name or ref_name or f"{highway_type}_{way.get('id')}"
@@ -83,6 +122,8 @@ def parse_osm_ways(osm_file: str, highway_types: List[str] = None) -> List[Dict]
                     'street_name': street_name,
                     'ref': ref_name,
                     'lane_id': lane_id,
+                    'width': width,  # Store width if available (meters)
+                    'lanes': lanes,  # Store number of lanes if available
                     'coordinates': coords,
                     'num_points': len(coords)
                 })
@@ -215,22 +256,93 @@ def main():
     args = parser.parse_args()
     
     print(f"📖 Parsing OSM file: {args.osm_file}")
+    print("   Filtering for Ackermann-navigable roads only...")
+    print("   ✅ Included: motorway, trunk, primary, secondary, tertiary, unclassified, residential")
+    print("   ❌ Excluded: service, footway, path, pedestrian, cycleway, track, steps")
+    
     ways = parse_osm_ways(args.osm_file)
-    print(f"✅ Found {len(ways)} road ways")
     
-    print(f"🛣 Extracting waypoints (spacing: {args.spacing}m)...")
-    waypoints, lanes_dict = extract_waypoints_from_ways(ways, spacing=args.spacing, min_distance=args.min_distance)
-    print(f"✅ Generated {len(waypoints)} waypoints from {len(lanes_dict)} lanes/streets")
+    # Filter only clearly non-navigable roads
+    # Be permissive: include roads unless explicitly too narrow (< 2.5m) or restricted
+    MIN_NAVIGABLE_WIDTH = 2.5  # meters - lower threshold to include more roads
     
-    # Use ALL waypoints (no sampling) - user wants all coordinates
-    print(f"📍 Using all {len(waypoints)} waypoints as delivery candidates")
+    # Major roads are always navigable
+    major_road_types = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary',
+                       'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link']
     
-    # Prepare lanes data with metadata
-    lanes_data = {}
-    for lane_id, lane_waypoints in lanes_dict.items():
-        # Find way metadata
+    navigable_ways = []
+    narrow_ways = []
+    
+    for way in ways:
+        highway_type = way['highway_type']
+        width = way.get('width')
+        lanes = way.get('lanes')
+        
+        # Major roads: always navigable
+        if highway_type in major_road_types:
+            navigable_ways.append(way)
+            continue
+        
+        # For residential/unclassified: be permissive - include unless explicitly too narrow
+        if highway_type in ['residential', 'unclassified']:
+            # Only exclude if width is explicitly too narrow (< 2.5m)
+            if width is not None and width < MIN_NAVIGABLE_WIDTH:
+                narrow_ways.append(way)
+                way['exclusion_reason'] = f'width_too_narrow_{width}m'
+            # Otherwise include (even without width info - assume navigable)
+            else:
+                navigable_ways.append(way)
+        else:
+            # Other types: include by default
+            navigable_ways.append(way)
+    
+    ways = navigable_ways
+    
+    # Count by highway type
+    type_counts = {}
+    for way in ways:
+        htype = way['highway_type']
+        type_counts[htype] = type_counts.get(htype, 0) + 1
+    
+    print(f"✅ Found {len(ways)} navigable road ways (excluded {len(narrow_ways)} explicitly narrow roads):")
+    for htype, count in sorted(type_counts.items()):
+        print(f"   - {htype}: {count} segments")
+    
+    if narrow_ways:
+        print(f"   (Excluded {len(narrow_ways)} roads with width < 2.5m)")
+    
+    # === 1. Extract waypoints from ALL roads (full map) ===
+    print(f"🛣 Extracting waypoints from ALL roads (full map)...")
+    all_ways = parse_osm_ways(args.osm_file)  # Get ALL roads (no filtering)
+    all_waypoints, _ = extract_waypoints_from_ways(all_ways, spacing=args.spacing, min_distance=args.min_distance)
+    
+    # Save full map coordinates
+    with open(args.output, 'w') as f:
+        json.dump({
+            'waypoints': [
+                {'x': wp[0], 'y': wp[1], 'yaw': wp[2]}
+                for wp in all_waypoints
+            ],
+            'total_waypoints': len(all_waypoints),
+            'source_osm': str(args.osm_file),
+            'metadata': {
+                'spacing': args.spacing,
+                'min_distance': args.min_distance
+            }
+        }, f, indent=2)
+    print(f"✅ Full map coordinates: {args.output}")
+    print(f"   - {len(all_waypoints)} waypoints (all roads)")
+    
+    # === 2. Extract waypoints from NAVIGABLE roads only ===
+    print(f"🛣 Extracting waypoints from navigable roads...")
+    nav_waypoints, nav_lanes_dict = extract_waypoints_from_ways(ways, spacing=args.spacing, min_distance=args.min_distance)
+    print(f"✅ Generated {len(nav_waypoints)} waypoints from {len(nav_lanes_dict)} navigable lanes/streets")
+    
+    # Prepare navigable lanes data
+    navigable_lanes_data = {}
+    for lane_id, lane_waypoints in nav_lanes_dict.items():
         way_info = next((w for w in ways if w['lane_id'] == lane_id), None)
-        lanes_data[lane_id] = {
+        navigable_lanes_data[lane_id] = {
             'waypoints': [
                 {'x': wp[0], 'y': wp[1], 'yaw': wp[2]}
                 for wp in lane_waypoints
@@ -241,49 +353,23 @@ def main():
             'num_waypoints': len(lane_waypoints)
         }
     
-    # Save main waypoints file (all coordinates)
-    data = {
-        'waypoints': [
-            {'x': wp[0], 'y': wp[1], 'yaw': wp[2]}
-            for wp in waypoints
-        ],
-        'lane_network': [
-            {'x': wp[0], 'y': wp[1], 'yaw': wp[2]}
-            for wp in waypoints
-        ],
-        'num_waypoints': len(waypoints),
-        'lane_network_size': len(waypoints),
-        'source_osm': str(args.osm_file),
-        'metadata': {
-            'spacing': args.spacing,
-            'min_distance': args.min_distance,
-            'total_lanes': len(lanes_dict)
-        }
-    }
+    # Save navigable lanes (user wants just this)
+    navigable_lanes_output = args.output.replace('.json', '_navigable_lanes.json')
+    with open(navigable_lanes_output, 'w') as f:
+        json.dump({
+            'lanes': navigable_lanes_data,
+            'total_lanes': len(navigable_lanes_data),
+            'total_waypoints': len(nav_waypoints),
+            'source_osm': str(args.osm_file),
+            'metadata': {
+                'spacing': args.spacing,
+                'min_distance': args.min_distance,
+                'road_types': list(type_counts.keys())
+            }
+        }, f, indent=2)
     
-    with open(args.output, 'w') as f:
-        json.dump(data, f, indent=2)
-    
-    # Save lanes/streets file (organized by lane)
-    lanes_output = args.output.replace('.json', '_lanes.json')
-    lanes_file_data = {
-        'lanes': lanes_data,
-        'total_lanes': len(lanes_data),
-        'total_waypoints': len(waypoints),
-        'source_osm': str(args.osm_file),
-        'metadata': {
-            'spacing': args.spacing,
-            'min_distance': args.min_distance
-        }
-    }
-    
-    with open(lanes_output, 'w') as f:
-        json.dump(lanes_file_data, f, indent=2)
-    
-    print(f"💾 Saved waypoints to: {args.output}")
-    print(f"   - {len(waypoints)} total waypoints (all coordinates)")
-    print(f"💾 Saved lanes/streets to: {lanes_output}")
-    print(f"   - {len(lanes_dict)} lanes/streets organized by name")
+    print(f"✅ Navigable lanes: {navigable_lanes_output}")
+    print(f"   - {len(navigable_lanes_data)} lanes, {len(nav_waypoints)} waypoints")
 
 
 if __name__ == '__main__':
